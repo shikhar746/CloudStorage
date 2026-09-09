@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import { createFolderSchema, updateFolderSchema } from "../schemas/folder.schema.js";
 import { supabase } from "../lib/supabase.js";
 import { env } from "../config/env.js"
-import { attachStarred } from '../lib/stars.js'
+import { attachStarred, deleteStarsFor } from '../lib/stars.js'
 import { getAccessRole } from "../lib/access.js"
 
 export async function createFolderController(req:Request, res:Response){
@@ -459,11 +459,13 @@ export async function emptyTrashController(req: Request, res: Response) {
     // trashed folder is about to disappear too — collect its blob as well, or
     // the row goes and the object stays behind forever
     const storageKeys = new Set(trashedFiles.map(f => f.storage_key))
+    // stars do not cascade either, so their ids are collected in the same pass
+    const purgedFileIds = new Set(trashedFiles.map(f => f.id))
 
     if (deletedFolderIds.length > 0) {
         const { data: nested, error: nestedError } = await supabase
             .from("files")
-            .select("storage_key")
+            .select("id, storage_key")
             .eq("owner_id", req.userId)
             .in("folder_id", deletedFolderIds)
 
@@ -474,7 +476,10 @@ export async function emptyTrashController(req: Request, res: Response) {
             })
         }
 
-        for (const f of nested) storageKeys.add(f.storage_key)
+        for (const f of nested) {
+            storageKeys.add(f.storage_key)
+            purgedFileIds.add(f.id)
+        }
     }
 
     if (storageKeys.size > 0) {
@@ -516,6 +521,9 @@ export async function emptyTrashController(req: Request, res: Response) {
             })
         }
     }
+
+    await deleteStarsFor('file', [...purgedFileIds])
+    await deleteStarsFor('folder', deletedFolderIds)
 
     return res.status(204).send()
 }
@@ -632,8 +640,8 @@ export async function permanentDeleteFolderController(req: Request, res: Respons
   }
 
   // collect the whole subtree
-  const allFolderIds = [id]
-  let currentLevel = [id]
+  const allFolderIds: string[] = [id as string]
+  let currentLevel: string[] = [id as string]
 
   while (currentLevel.length > 0) {
     const { data: children, error: childError } = await supabase
@@ -657,7 +665,7 @@ export async function permanentDeleteFolderController(req: Request, res: Respons
   // find every file in that subtree so we can clear the bucket
   const { data: files, error: filesError } = await supabase
     .from("files")
-    .select("storage_key")
+    .select("id, storage_key")
     .in("folder_id", allFolderIds)
     .eq("owner_id", req.userId)
 
@@ -693,6 +701,10 @@ export async function permanentDeleteFolderController(req: Request, res: Respons
       error: { code: "DELETE_FAILED", message: "Failed to delete folder" },
     })
   }
+
+  // the whole subtree is gone for good — drop every user's stars across all of it
+  await deleteStarsFor('file', files.map(f => f.id))
+  await deleteStarsFor('folder', allFolderIds)
 
   return res.status(204).send()
 }

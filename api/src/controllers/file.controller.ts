@@ -2,7 +2,7 @@ import crypto from 'crypto'
 import type { Request, Response } from 'express'
 import { supabase } from '../lib/supabase.js'
 import { env } from '../config/env.js'
-import { attachStarred } from '../lib/stars.js'
+import { attachStarred, deleteStarsFor } from '../lib/stars.js'
 import { getAccessRole } from '../lib/access.js'
 import {
   uploadFileSchema,
@@ -435,6 +435,9 @@ export async function permanentDeleteFileController(req: Request, res: Response)
       error: { code: "DELETE_FAILED", message: "Failed to delete file" },
     })
   }
+
+  // the row is gone for good, so every user's star on it now points at nothing
+  await deleteStarsFor('file', [id as string])
 
   return res.status(204).send()
 }

@@ -114,17 +114,28 @@ export async function listStarredController(req: Request, res: Response) {
 
   // A star also outlives a share being revoked. Own items skip the check;
   // only starred items belonging to someone else pay for a role lookup.
+  //
+  // Every getAccessRole call is several round trips of its own, and no check
+  // reads what an earlier one returned — so they are free to overlap instead
+  // of queueing behind each other.
   async function visible<T extends { id: string; owner_id?: string }>(
     rows: T[],
     resourceType: 'file' | 'folder'
   ): Promise<T[]> {
-    const out: T[] = []
-    for (const row of rows) {
-      if (row.owner_id === req.userId || (await getAccessRole(req.userId, resourceType, row.id))) {
-        out.push(row)
-      }
-    }
-    return out
+    // One lookup per row, all in flight at once instead of queued behind each
+    // other. Own rows short-circuit to a plain `true` and never reach the
+    // database at all, which covers most of a typical Starred list.
+    const checks = await Promise.all(
+      rows.map((row) =>
+        row.owner_id === req.userId ? true : getAccessRole(req.userId, resourceType, row.id)
+      )
+    )
+
+    // `checks` is index-aligned with `rows` — Promise.all preserves input order
+    // regardless of which lookup finished first — so filtering by position keeps
+    // each row matched to its own result, and keeps the original order for the
+    // star-date sort that follows.
+    return rows.filter((_, i) => Boolean(checks[i]))
   }
 
   const byStarredAt = <T extends { id: string }>(a: T, b: T) =>

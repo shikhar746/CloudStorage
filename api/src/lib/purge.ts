@@ -1,17 +1,12 @@
 import { supabase } from './supabase.js'
 import { env } from '../config/env.js'
+import { chunk } from './chunk.js'
+import { deleteStarsFor } from './stars.js'
 
 export interface PurgeResult {
   folders: number
   files: number
   blobs: number
-}
-
-/** Storage removes in batches; a few thousand keys in one call is asking for a timeout. */
-function chunk<T>(items: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
 }
 
 /**
@@ -46,17 +41,24 @@ export async function purgeExpiredTrash(): Promise<PurgeResult> {
   const folderIds = expiredFolders.map((f) => f.id)
   const fileIds = expiredFiles.map((f) => f.id)
   const storageKeys = new Set(expiredFiles.map((f) => f.storage_key))
+  // Stars carry no foreign key, so nothing cascades them away. Their ids have
+  // to be gathered here, in the same pass as the blobs: once the rows are gone
+  // there is no longer anything to work out which stars were left dangling.
+  const purgedFileIds = new Set(fileIds)
 
   // Every file under an expiring folder loses its row to the cascade, whether
   // or not it was trashed in its own right, so its blob has to go as well.
   if (folderIds.length > 0) {
     const { data: nested, error: nestedError } = await supabase
       .from('files')
-      .select('storage_key')
+      .select('id, storage_key')
       .in('folder_id', folderIds)
 
     if (nestedError) throw new Error(`purge nested file lookup failed: ${nestedError.message}`)
-    for (const f of nested) storageKeys.add(f.storage_key)
+    for (const f of nested) {
+      storageKeys.add(f.storage_key)
+      purgedFileIds.add(f.id)
+    }
   }
 
   for (const batch of chunk([...storageKeys], 100)) {
@@ -81,6 +83,11 @@ export async function purgeExpiredTrash(): Promise<PurgeResult> {
     const { error } = await supabase.from('folders').delete().in('id', folderIds)
     if (error) throw new Error(`purge folder delete failed: ${error.message}`)
   }
+
+  // Last, and only once the rows are really gone: a star pointing at a resource
+  // that still exists is not dangling, so an earlier sweep could delete a live one.
+  await deleteStarsFor('file', [...purgedFileIds])
+  await deleteStarsFor('folder', folderIds)
 
   return { folders: folderIds.length, files: fileIds.length, blobs: storageKeys.size }
 }

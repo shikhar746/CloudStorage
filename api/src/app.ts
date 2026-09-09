@@ -33,7 +33,7 @@ const hasWebBuild = fs.existsSync(webIndex)
 export const webBundle = hasWebBuild ? webDist : null
 
 // Render/Vercel terminate TLS in front of the app; without this Express sees
-// every request as plain http and req.ip is the proxy's address
+// every requ  lest as plain http and req.ip is the proxy's address
 app.set('trust proxy', 1)
 
 // An allowed origin may contain "*" as a wildcard, so a single CORS_ORIGIN
