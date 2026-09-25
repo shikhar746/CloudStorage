@@ -22,7 +22,9 @@ import {
  * override, so this is a constant rather than build-time configuration.
  *
  * It is the same origin the app itself is served from, which is what keeps the
- * auth cookies first-party — see DEPLOY.md. Written out in full so that
+ * auth cookies first-party: hosted separately they would be third-party
+ * cookies, which Safari, Brave and any blocker extension drop outright — login
+ * returns 200 and the very next request is a 401. Written out in full so that
  * running the dev server locally still talks to the real API.
  */
 export const API_BASE_URL = 'https://cloud-storage-api-hquw.onrender.com';
@@ -67,6 +69,11 @@ export class ApiError extends Error {
   }
 }
 
+/** Builds the ApiError for a failed response, whatever shape the body took. */
+function apiErrorFrom(data: any, status: number): ApiError {
+  return new ApiError(extractErrorMessage(data, status), data?.error?.code, status);
+}
+
 /**
  * Calls a public share endpoint.
  *
@@ -84,9 +91,7 @@ async function publicRequest<T>(path: string, body?: unknown): Promise<T> {
   });
 
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new ApiError(extractErrorMessage(data, res.status), data?.error?.code, res.status);
-  }
+  if (!res.ok) throw apiErrorFrom(data, res.status);
   return data as T;
 }
 
@@ -120,6 +125,36 @@ export function getPublicFile(
   });
 }
 
+/** The embedded user the shares endpoints join in. */
+interface ShareUserRow {
+  id: string;
+  email: string;
+  name: string | null;
+}
+
+/** POST /api/shares — the row is returned with its own columns, flat. */
+interface CreatedShareRow {
+  id: string;
+  resource_type: ResourceType;
+  resource_id: string;
+  grantee_user_id: string;
+  role: ShareRole;
+  created_at: string;
+}
+
+/** GET /api/shares/:type/:id — the grantee arrives as an embedded resource. */
+interface ListedShareRow {
+  id: string;
+  role: ShareRole;
+  created_at: string;
+  users: ShareUserRow | null;
+}
+
+/**
+ * The API's identity comes from the httpOnly session cookie, which the browser
+ * attaches on its own. No method here takes a user id: passing one would imply
+ * the client scopes the request, and it does not.
+ */
 export class ApiClient {
   private refreshPromise: Promise<boolean> | null = null;
   private serverInfo: { limits: UploadLimits; trashRetentionDays: number | null } | null = null;
@@ -173,9 +208,10 @@ export class ApiClient {
     }
 
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(extractErrorMessage(data, res.status));
-    }
+    // an ApiError, not a bare Error: the server's `code` is the only thing that
+    // lets a caller tell "that name is taken" from "the request was rejected",
+    // and dropping it forces guesswork at every call site
+    if (!res.ok) throw apiErrorFrom(data, res.status);
     return data as T;
   }
 
@@ -307,51 +343,50 @@ export class ApiClient {
   }
 
   // Folder Operations
-  async getRoot(userId: string): Promise<FolderContentResponse> {
+  async getRoot(): Promise<FolderContentResponse> {
     return this.request<FolderContentResponse>('/api/folders/root');
   }
 
-  async getFolder(userId: string, folderId: string): Promise<FolderContentResponse> {
+  async getFolder(folderId: string): Promise<FolderContentResponse> {
     return this.request<FolderContentResponse>(`/api/folders/${folderId}`);
   }
 
-  async createFolder(userId: string, name: string, parentId?: string | null): Promise<Folder> {
-    const res = await this.request<{ folder?: Folder; id?: string; name?: string }>('/api/folders', {
+  async createFolder(name: string, parentId?: string | null): Promise<Folder> {
+    const res = await this.request<{ folder: Folder }>('/api/folders', {
       method: 'POST',
       body: JSON.stringify({ name, parentId: parentId ?? null }),
     });
-    return (res.folder || res) as Folder;
+    return res.folder;
   }
 
   async updateFolder(
-    userId: string,
     folderId: string,
     updates: { name?: string; parentId?: string | null }
   ): Promise<Folder> {
-    const res = await this.request<{ folder?: Folder }> (`/api/folders/${folderId}`, {
+    const res = await this.request<{ folder: Folder }>(`/api/folders/${folderId}`, {
       method: 'PATCH',
       body: JSON.stringify(updates),
     });
-    return (res.folder || res) as Folder;
+    return res.folder;
   }
 
   /** Ancestor chain ending at this folder, so breadcrumbs survive a refresh. */
-  async getFolderPath(userId: string, folderId: string): Promise<BreadcrumbItem[]> {
+  async getFolderPath(folderId: string): Promise<BreadcrumbItem[]> {
     const res = await this.request<{ path: Array<{ id: string; name: string }> }>(
       `/api/folders/${folderId}/path`
     );
     return res.path || [];
   }
 
-  async deleteFolder(userId: string, folderId: string): Promise<void> {
+  async deleteFolder(folderId: string): Promise<void> {
     return this.request<void>(`/api/folders/${folderId}`, { method: 'DELETE' });
   }
 
-  async restoreFolder(userId: string, folderId: string): Promise<void> {
+  async restoreFolder(folderId: string): Promise<void> {
     return this.request<void>(`/api/folders/${folderId}/restore`, { method: 'PATCH' });
   }
 
-  async permanentDeleteFolder(userId: string, folderId: string): Promise<void> {
+  async permanentDeleteFolder(folderId: string): Promise<void> {
     return this.request<void>(`/api/folders/${folderId}/permanent`, { method: 'DELETE' });
   }
 
@@ -362,7 +397,6 @@ export class ApiClient {
    * forwards it to storage. Capped server-side at MAX_FILE_SIZE_BYTES.
    */
   async uploadFile(
-    userId: string,
     file: File,
     folderId?: string | null,
     onProgress?: (loaded: number, total: number) => void,
@@ -384,7 +418,7 @@ export class ApiClient {
 
     // xhrSend does not run the fetch path's refresh-on-401, so do it here
     if (res.status === 401 && !isRetry && (await this.refreshSession())) {
-      return this.uploadFile(userId, file, folderId, onProgress, true);
+      return this.uploadFile(file, folderId, onProgress, true);
     }
 
     // a proxy or gateway can answer with HTML, so never assume JSON parses
@@ -396,9 +430,9 @@ export class ApiClient {
     }
 
     if (res.status < 200 || res.status >= 300) {
-      throw new Error(extractErrorMessage(data, res.status));
+      throw apiErrorFrom(data, res.status);
     }
-    return (data.file || data) as FileItem;
+    return data.file as FileItem;
   }
 
   /**
@@ -406,7 +440,6 @@ export class ApiClient {
    * PUT the file straight to storage, then tell the API to record the row.
    */
   async uploadFileDirect(
-    userId: string,
     file: File,
     folderId?: string | null,
     onProgress?: (loaded: number, total: number) => void
@@ -441,7 +474,7 @@ export class ApiClient {
       throw new Error(`Storage rejected the upload (HTTP ${put.status})`);
     }
 
-    const res = await this.request<{ file?: FileItem }>('/api/files/complete', {
+    const res = await this.request<{ file: FileItem }>('/api/files/complete', {
       method: 'POST',
       body: JSON.stringify({
         storageKey: ticket.storageKey,
@@ -449,58 +482,59 @@ export class ApiClient {
         folderId: folderId ?? null,
       }),
     });
-    return (res.file || res) as FileItem;
+    return res.file;
   }
 
   /** Files in one folder, without the folder tree that getFolder also returns. */
-  async listFiles(userId: string, folderId?: string | null): Promise<FileItem[]> {
+  async listFiles(folderId?: string | null): Promise<FileItem[]> {
     const qs = folderId ? `?folderId=${encodeURIComponent(folderId)}` : '';
     const res = await this.request<{ files: FileItem[] }>(`/api/files${qs}`);
     return res.files || [];
   }
 
-  async getFile(userId: string, fileId: string): Promise<{ file: FileItem; signedUrl: string }> {
+  async getFile(fileId: string): Promise<{ file: FileItem; signedUrl: string }> {
     return this.request<{ file: FileItem; signedUrl: string }>(`/api/files/${fileId}`);
   }
 
   async updateFile(
-    userId: string,
     fileId: string,
     updates: { name?: string; folderId?: string | null }
   ): Promise<FileItem> {
-    const res = await this.request<{ file?: FileItem }>(`/api/files/${fileId}`, {
+    const res = await this.request<{ file: FileItem }>(`/api/files/${fileId}`, {
       method: 'PATCH',
       body: JSON.stringify(updates),
     });
-    return (res.file || res) as FileItem;
+    return res.file;
   }
 
-  async deleteFile(userId: string, fileId: string): Promise<void> {
+  async deleteFile(fileId: string): Promise<void> {
     return this.request<void>(`/api/files/${fileId}`, { method: 'DELETE' });
   }
 
-  async restoreFile(userId: string, fileId: string): Promise<FileItem> {
-    const res = await this.request<{ file?: FileItem }>(`/api/files/${fileId}/restore`, { method: 'PATCH' });
-    return (res.file || res) as FileItem;
+  async restoreFile(fileId: string): Promise<FileItem> {
+    const res = await this.request<{ file: FileItem }>(`/api/files/${fileId}/restore`, {
+      method: 'PATCH',
+    });
+    return res.file;
   }
 
-  async permanentDeleteFile(userId: string, fileId: string): Promise<void> {
+  async permanentDeleteFile(fileId: string): Promise<void> {
     return this.request<void>(`/api/files/${fileId}/permanent`, { method: 'DELETE' });
   }
 
   // Trash
-  async getTrash(userId: string): Promise<TrashResponse> {
+  async getTrash(): Promise<TrashResponse> {
     return this.request<TrashResponse>('/api/folders/trash');
   }
 
-  async emptyTrash(userId: string): Promise<void> {
+  async emptyTrash(): Promise<void> {
     // one server-side sweep — the old client loop fired a request per item and
     // could leave the trash half emptied if any one of them failed
     return this.request<void>('/api/folders/trash', { method: 'DELETE' });
   }
 
   // Search
-  async search(userId: string, query: string): Promise<SearchResponse> {
+  async search(query: string): Promise<SearchResponse> {
     return this.request<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`);
   }
 
@@ -554,53 +588,40 @@ export class ApiClient {
 
   // Shares
   async createShare(
-    userId: string,
     resourceType: ResourceType,
     resourceId: string,
     granteeUserId: string,
     role: ShareRole
   ): Promise<ShareItem> {
-    const res = await this.request<{ share?: any } | any>('/api/shares', {
+    // the create endpoint returns the row's own columns, flat
+    const res = await this.request<{ share: CreatedShareRow }>('/api/shares', {
       method: 'POST',
-      body: JSON.stringify({
-        resourceType,
-        resourceId,
-        granteeUserId,
-        role,
-      }),
+      body: JSON.stringify({ resourceType, resourceId, granteeUserId, role }),
     });
-    // Unwrap the envelope res.share and flatten
-    const raw = res.share || res;
-    return {
-      id: raw.id,
-      resource_type: raw.resource_type || resourceType,
-      resource_id: raw.resource_id || resourceId,
-      grantee_user_id: raw.grantee_user_id || raw.users?.id || granteeUserId,
-      role: raw.role || role,
-      created_at: raw.created_at,
-      grantee_name: raw.grantee_name || raw.users?.name,
-      grantee_email: raw.grantee_email || raw.users?.email,
-    } as ShareItem;
+    return { ...res.share };
   }
 
-  async listShares(userId: string, resourceType: ResourceType, resourceId: string): Promise<ShareItem[]> {
-    const res = await this.request<{ shares: any[] }>(`/api/shares/${resourceType}/${resourceId}`);
-    const rawShares = res.shares || [];
-    // Flatten the API users!grantee_user_id join
-    return rawShares.map((s: any) => ({
-      id: s.id,
-      resource_type: s.resource_type || resourceType,
-      resource_id: s.resource_id || resourceId,
-      role: s.role,
-      created_at: s.created_at,
-      grantee_user_id: s.grantee_user_id || s.users?.id || '',
-      grantee_name: s.grantee_name || s.users?.name || '',
-      grantee_email: s.grantee_email || s.users?.email || '',
+  async listShares(resourceType: ResourceType, resourceId: string): Promise<ShareItem[]> {
+    // this endpoint joins the grantee in as an embedded `users` resource and
+    // does not repeat resource_type/resource_id on each row, so they come from
+    // the arguments that selected them
+    const res = await this.request<{ shares: ListedShareRow[] }>(
+      `/api/shares/${resourceType}/${resourceId}`
+    );
+    return (res.shares || []).map((share) => ({
+      id: share.id,
+      resource_type: resourceType,
+      resource_id: resourceId,
+      role: share.role,
+      created_at: share.created_at,
+      grantee_user_id: share.users?.id ?? '',
+      grantee_name: share.users?.name ?? '',
+      grantee_email: share.users?.email ?? '',
     }));
   }
 
   /** Resources other people have shared directly with the signed-in user. */
-  async getSharedWithMe(userId: string): Promise<SharedWithMeResponse> {
+  async getSharedWithMe(): Promise<SharedWithMeResponse> {
     const res = await this.request<SharedWithMeResponse>('/api/shares/shared-with-me');
     return { folders: res.folders || [], files: res.files || [] };
   }
@@ -613,7 +634,7 @@ export class ApiClient {
     return res.user;
   }
 
-  async deleteShare(userId: string, shareId: string): Promise<void> {
+  async deleteShare(shareId: string): Promise<void> {
     return this.request<void>(`/api/shares/${shareId}`, { method: 'DELETE' });
   }
 }

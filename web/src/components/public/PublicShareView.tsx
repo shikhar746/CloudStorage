@@ -18,12 +18,18 @@ import {
 import { FileIcon } from '../common/FileIcon';
 import { PasswordInput } from '../common/PasswordInput';
 import { formatBytes, formatDate } from '../../utils/formatters';
-import {
-  FileItem,
-  PublicShareMeta,
-  PublicSharePayload,
-  PublicFolderPayload,
-} from '../../types/storage';
+import { FileItem, PublicShareMeta, PublicSharePayload } from '../../types/storage';
+
+/** Turns a failure into something a visitor with no account can act on. */
+function describe(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code === 'LINK_EXPIRED') return 'This link has expired.';
+    if (err.code === 'LINK_NOT_FOUND') return 'This link does not exist or has been revoked.';
+    if (err.code === 'RESOURCE_GONE') return 'The shared item no longer exists.';
+    return err.message;
+  }
+  return err instanceof Error ? err.message : 'Something went wrong.';
+}
 
 interface PublicShareViewProps {
   token: string;
@@ -73,16 +79,6 @@ export const PublicShareView: React.FC<PublicShareViewProps> = ({ token }) => {
     // openLink is stable enough for a mount-only effect keyed on the token
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
-
-  function describe(err: unknown): string {
-    if (err instanceof ApiError) {
-      if (err.code === 'LINK_EXPIRED') return 'This link has expired.';
-      if (err.code === 'LINK_NOT_FOUND') return 'This link does not exist or has been revoked.';
-      if (err.code === 'RESOURCE_GONE') return 'The shared item no longer exists.';
-      return err.message;
-    }
-    return err instanceof Error ? err.message : 'Something went wrong.';
-  }
 
   const openLink = useCallback(
     async (pw: string) => {
@@ -249,8 +245,10 @@ export const PublicShareView: React.FC<PublicShareViewProps> = ({ token }) => {
   }
 
   if (payload?.resourceType === 'folder') {
-    const folderPayload = payload as PublicFolderPayload;
-    const { folders, files } = folderPayload.children;
+    // `resourceType` is the union's discriminant, so this branch is already
+    // narrowed to PublicFolderPayload — a cast here would only mask a future
+    // mismatch between the payload types and what the server actually sends.
+    const { folders, files } = payload.children;
     const empty = folders.length === 0 && files.length === 0;
 
     return shell(

@@ -16,24 +16,20 @@ function required(name: string): string {
     return value
 }
 
-// optionalNumber(name, fallback)
-//helper for port and max file sie bytes must reject nan
-function optionalNumber(name: string, fallback: number): number {
-    const value = process.env[name]
-    if (!value) return fallback                    // was: value === undefined
-    const n = Number(value)
-    if (!Number.isInteger(n) || n <= 0)            // was: Number.isNaN(n)
-        throw new Error(`Environment variable ${name} must be a positive integer, got: ${value}`)
-    return n                                        // error message was empty
-}
-// like optionalNumber, but 0 is a meaningful value ("switched off") rather
-// than an error — used by the purge interval
-function optionalCount(name: string, fallback: number): number {
+// optionalNumber(name, fallback, options)
+// Reads a numeric setting, rejecting anything that is not a whole number.
+// `min` is 1 by default because most of these are sizes and windows where zero
+// is meaningless; the purge interval passes 0 to mean "switched off", which is
+// a real setting rather than a mistake.
+function optionalNumber(name: string, fallback: number, options: { min?: number } = {}): number {
+    const min = options.min ?? 1
     const value = process.env[name]
     if (value === undefined || value.trim() === '') return fallback
     const n = Number(value)
-    if (!Number.isInteger(n) || n < 0)
-        throw new Error(`Environment variable ${name} must be a non-negative integer, got: ${value}`)
+    if (!Number.isInteger(n) || n < min)
+        throw new Error(
+            `Environment variable ${name} must be an integer of at least ${min}, got: ${value}`
+        )
     return n
 }
 
@@ -117,7 +113,7 @@ export const env = {
     TRASH_RETENTION_DAYS: optionalNumber('TRASH_RETENTION_DAYS', 30),
     // how often the in-process sweeper runs. 0 switches it off, which is what
     // you want when an external scheduler drives the purge instead.
-    TRASH_PURGE_INTERVAL_MINUTES: optionalCount('TRASH_PURGE_INTERVAL_MINUTES', 360),
+    TRASH_PURGE_INTERVAL_MINUTES: optionalNumber('TRASH_PURGE_INTERVAL_MINUTES', 360, { min: 0 }),
     // shared secret for POST /api/maintenance/purge-trash. Unset disables the
     // endpoint entirely rather than leaving it open.
     PURGE_SECRET: optionalString('PURGE_SECRET'),

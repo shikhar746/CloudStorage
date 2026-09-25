@@ -42,7 +42,7 @@ export const FilePreviewModal: React.FC = () => {
     setLoadingUrl(true);
 
     // Fetch fresh signed URL from API per-open (expires in 1 hour)
-    api.getFile(user.id, previewFile.id)
+    api.getFile(previewFile.id)
       .then((res: any) => {
         if (!isMounted) return;
         const freshUrl = res.signedUrl || res.file?.signedUrl || res.file?.previewUrl;

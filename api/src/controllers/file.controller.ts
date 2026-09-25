@@ -2,14 +2,28 @@ import crypto from 'crypto'
 import type { Request, Response } from 'express'
 import { supabase } from '../lib/supabase.js'
 import { env } from '../config/env.js'
-import { attachStarred, deleteStarsFor } from '../lib/stars.js'
+import { attachStarred } from '../lib/stars.js'
 import { getAccessRole } from '../lib/access.js'
+import { parentFolderIsUnavailable } from '../lib/folderTree.js'
+import { hardDeleteResources } from '../lib/hardDelete.js'
 import {
   uploadFileSchema,
   updateFileSchema,
   createUploadUrlSchema,
   completeUploadSchema,
 } from '../schemas/file.schema.js'
+
+/**
+ * Whether the caller may put something into this folder.
+ *
+ * Editors on a shared folder may upload into it and move things around inside
+ * it, the same rule renaming follows. Every destination check in this file
+ * asks exactly this question, so it is asked in one place.
+ */
+async function isEditableFolder(userId: string, folderId: string): Promise<boolean> {
+  const role = await getAccessRole(userId, 'folder', folderId)
+  return role === 'owner' || role === 'editor'
+}
 
 export async function uploadFileController(req: Request, res: Response) {
   // 1. multer puts the file here — no file means nothing to do
@@ -37,13 +51,10 @@ export async function uploadFileController(req: Request, res: Response) {
   // 3. service role key bypasses RLS — this check is the ONLY thing
   //    stopping someone uploading into another user's folder. Editors on a
   //    shared folder may upload into it, same rule as renaming or moving.
-  if (folderId) {
-    const folderRole = await getAccessRole(req.userId, 'folder', folderId)
-    if (folderRole !== 'owner' && folderRole !== 'editor') {
-      return res.status(404).json({
-        error: { code: "FOLDER_NOT_FOUND", message: "Folder not found" },
-      })
-    }
+  if (folderId && !(await isEditableFolder(req.userId, folderId))) {
+    return res.status(404).json({
+      error: { code: "FOLDER_NOT_FOUND", message: "Folder not found" },
+    })
   }
 
   // 4. generated key, never the user's filename
@@ -110,13 +121,10 @@ export async function createUploadUrlController(req: Request, res: Response) {
   const folderId = data.folderId ?? null
 
   // same rule as the multipart path — owner or editor on the destination
-  if (folderId) {
-    const folderRole = await getAccessRole(req.userId, 'folder', folderId)
-    if (folderRole !== 'owner' && folderRole !== 'editor') {
-      return res.status(404).json({
-        error: { code: "FOLDER_NOT_FOUND", message: "Folder not found" },
-      })
-    }
+  if (folderId && !(await isEditableFolder(req.userId, folderId))) {
+    return res.status(404).json({
+      error: { code: "FOLDER_NOT_FOUND", message: "Folder not found" },
+    })
   }
 
   // same shape as the multipart path: the prefix is what /complete checks
@@ -190,13 +198,10 @@ export async function completeUploadController(req: Request, res: Response) {
   // the client explicitly sends a different one — which is re-checked either way
   const folderId = data.folderId !== undefined ? data.folderId : pending.folder_id
 
-  if (folderId) {
-    const folderRole = await getAccessRole(req.userId, 'folder', folderId)
-    if (folderRole !== 'owner' && folderRole !== 'editor') {
-      return res.status(404).json({
-        error: { code: "FOLDER_NOT_FOUND", message: "Folder not found" },
-      })
-    }
+  if (folderId && !(await isEditableFolder(req.userId, folderId))) {
+    return res.status(404).json({
+      error: { code: "FOLDER_NOT_FOUND", message: "Folder not found" },
+    })
   }
 
   // read size and mime back from storage: it proves the blob really landed, and
@@ -358,9 +363,17 @@ export async function updateFileController(req: Request, res: Response) {
         })
     }
 
-    if (rawdata.folderId) {
-      const folderRole = await getAccessRole(req.userId, 'folder', rawdata.folderId)
-      if (folderRole !== 'owner' && folderRole !== 'editor') {
+    // `undefined` means "not moving". An explicit null means "move to my root",
+    // which is still a move: the root belongs to the file's owner, so only the
+    // owner may put something there. Testing for truthiness instead would let
+    // an editor pull the file out of the share they reached it through.
+    if (rawdata.folderId !== undefined) {
+      const allowed =
+        rawdata.folderId === null
+          ? role === 'owner'
+          : await isEditableFolder(req.userId, rawdata.folderId)
+
+      if (!allowed) {
           return res.status(404).json({
               error: { code: "FOLDER_NOT_FOUND", message: "Folder not found" },
           })
@@ -390,10 +403,9 @@ export async function updateFileController(req: Request, res: Response) {
 export async function permanentDeleteFileController(req: Request, res: Response) {
   const { id } = req.params
 
-  // Delete from Supabase Storage first (physical delete)
   const { data: file, error: selectError } = await supabase
     .from("files")
-    .select("storage_key")
+    .select("id, storage_key")
     .eq("id", id)
     .eq("owner_id", req.userId)
     .eq("is_deleted", true)
@@ -405,39 +417,17 @@ export async function permanentDeleteFileController(req: Request, res: Response)
     })
   }
 
-  const { error: storageError } = await supabase.storage
-    .from(env.SUPABASE_STORAGE_BUCKET)
-    .remove([file.storage_key])
-
-  if (storageError) {
-    console.error("storage delete failed",  storageError, file.storage_key)
-
-
-
-    
-  //if storage delete fails then we dont delete file from db 
-
-    // return res.status(500).json({
-    //   error: { code: "DELETE_FAILED", message: "Failed to delete file" },
-    // })
-  }
-
-  // Then delete from database
-  const { error: dbError } = await supabase
-    .from("files")
-    .delete()
-    .eq("id", id)
-    .eq("owner_id", req.userId)
-
-  if (dbError) {
-    console.error("db delete failed", dbError)
+  // Blob first, then the row, then every user's star on it — the same order
+  // and the same helper the folder and sweeper paths use. A storage failure is
+  // logged rather than fatal: a stuck row is worse than a logged orphan.
+  try {
+    await hardDeleteResources({ folderIds: [], files: [file], ownerId: req.userId })
+  } catch (err) {
+    console.error("permanent file delete failed", err)
     return res.status(500).json({
       error: { code: "DELETE_FAILED", message: "Failed to delete file" },
     })
   }
-
-  // the row is gone for good, so every user's star on it now points at nothing
-  await deleteStarsFor('file', [id as string])
 
   return res.status(204).send()
 }
@@ -458,21 +448,11 @@ export async function restoreFileController(req: Request, res: Response){
             error: { code: "FILE_NOT_FOUND", message: "File not found" },
         })
 
-    let parentIsDeleted = false
-
-    if (target.folder_id) {
-        const { data: parent } = await supabase
-            .from("folders")
-            .select("id, is_deleted")
-            .eq("id", target.folder_id)
-            .eq("owner_id", req.userId)
-            .single()
-
-        parentIsDeleted = !parent || parent.is_deleted
-    }
-
     const restoreUpdate: Record<string, unknown> = { is_deleted: false, deleted_at: null }
-    if (parentIsDeleted) restoreUpdate.folder_id = null
+    // if the original folder is still in the trash, restore to root instead
+    if (await parentFolderIsUnavailable(req.userId, target.folder_id)) {
+        restoreUpdate.folder_id = null
+    }
 
     const { data: file, error: fileError } = await supabase
         .from("files")
