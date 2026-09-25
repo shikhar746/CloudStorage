@@ -33,7 +33,7 @@ export const ShareModal: React.FC = () => {
     if (!user || !shareTarget) return;
     setLoadingShares(true);
     try {
-      const list = await api.listShares(user.id, shareTarget.type, shareTarget.item.id);
+      const list = await api.listShares(shareTarget.type, shareTarget.item.id);
       setShares(list);
     } catch (err) {
       console.error('Failed to load shares', err);
@@ -71,7 +71,7 @@ export const ShareModal: React.FC = () => {
         return;
       }
 
-      await api.createShare(user.id, shareTarget.type, shareTarget.item.id, granteeUserId, role);
+      await api.createShare(shareTarget.type, shareTarget.item.id, granteeUserId, role);
       setGrantee('');
       await loadShares();
     } catch (err) {
@@ -84,7 +84,7 @@ export const ShareModal: React.FC = () => {
   const handleDeleteShare = async (shareId: string) => {
     if (!user) return;
     try {
-      await api.deleteShare(user.id, shareId);
+      await api.deleteShare(shareId);
       await loadShares();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to revoke access');

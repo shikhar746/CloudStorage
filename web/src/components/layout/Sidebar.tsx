@@ -7,13 +7,22 @@ import {
   Plus,
   FolderPlus,
   UploadCloud,
-  ChevronRight,
   Database,
   X,
   Cloud,
 } from 'lucide-react';
 import { useStorage } from '../../context/StorageContext';
+import { SidebarNavItem } from './SidebarNavItem';
+import { ActiveNavTab } from '../../types/storage';
 import { formatBytes } from '../../utils/formatters';
+
+/** The sidebar's destinations, in order. */
+const NAV_ITEMS: Array<{ tab: ActiveNavTab; label: string; icon: typeof HardDrive }> = [
+  { tab: 'files', label: 'My Files', icon: HardDrive },
+  { tab: 'shared', label: 'Shared with me', icon: Users },
+  { tab: 'starred', label: 'Starred', icon: Star },
+  { tab: 'trash', label: 'Trash Bin', icon: Trash2 },
+];
 
 export const Sidebar: React.FC = () => {
   const {
@@ -160,109 +169,23 @@ export const Sidebar: React.FC = () => {
 
             {/* Primary Navigation Links */}
             <nav className="space-y-1">
-              <button
-                id="nav-my-files"
-                onClick={() => {
-                  setActiveTab('files');
-                  navigateToFolder(null);
-                  handleNav();
-                }}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                  activeTab === 'files'
-                    ? 'bg-indigo-600/10 text-indigo-400 font-semibold'
-                    : 'text-gray-400 hover:bg-[#1a1a1a] hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <HardDrive
-                    className={`w-4 h-4 ${
-                      activeTab === 'files' ? 'text-indigo-400' : 'text-gray-500'
-                    }`}
-                  />
-                  <span>My Files</span>
-                </div>
-                {activeTab === 'files' && <ChevronRight className="w-3.5 h-3.5 text-indigo-400" />}
-              </button>
-
-              <button
-                  id="nav-shared"
-                  onClick={() => {
-                    setActiveTab('shared');
+              {NAV_ITEMS.map(({ tab, label, icon }) => (
+                <SidebarNavItem
+                  key={tab}
+                  tab={tab}
+                  label={label}
+                  icon={icon}
+                  isActive={activeTab === tab}
+                  count={tab === 'shared' ? sharedCount : tab === 'trash' ? trashCount : 0}
+                  onSelect={() => {
+                    setActiveTab(tab);
+                    // My Files always reopens at the root rather than wherever
+                    // the user last wandered to
+                    if (tab === 'files') navigateToFolder(null);
                     handleNav();
                   }}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                    activeTab === 'shared'
-                      ? 'bg-indigo-600/10 text-indigo-400 font-semibold'
-                      : 'text-gray-400 hover:bg-[#1a1a1a] hover:text-white'
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <Users
-                      className={`w-4 h-4 ${
-                        activeTab === 'shared' ? 'text-indigo-400' : 'text-gray-500'
-                      }`}
-                    />
-                    <span>Shared with me</span>
-                  </div>
-                  {sharedCount > 0 ? (
-                    <span className="text-[11px] font-semibold bg-[#1a1a1a] border border-[#2a2a2a] text-gray-400 px-2 py-0.5 rounded-full">
-                      {sharedCount}
-                    </span>
-                  ) : (
-                    activeTab === 'shared' && <ChevronRight className="w-3.5 h-3.5 text-indigo-400" />
-                  )}
-              </button>
-
-              <button
-                id="nav-starred"
-                onClick={() => {
-                  setActiveTab('starred');
-                  handleNav();
-                }}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                  activeTab === 'starred'
-                    ? 'bg-indigo-600/10 text-indigo-400 font-semibold'
-                    : 'text-gray-400 hover:bg-[#1a1a1a] hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <Star
-                    className={`w-4 h-4 ${
-                      activeTab === 'starred' ? 'text-indigo-400' : 'text-gray-500'
-                    }`}
-                  />
-                  <span>Starred</span>
-                </div>
-                {activeTab === 'starred' && <ChevronRight className="w-3.5 h-3.5 text-indigo-400" />}
-              </button>
-
-              <button
-                id="nav-trash"
-                onClick={() => {
-                  setActiveTab('trash');
-                  handleNav();
-                }}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                  activeTab === 'trash'
-                    ? 'bg-indigo-600/10 text-indigo-400 font-semibold'
-                    : 'text-gray-400 hover:bg-[#1a1a1a] hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <Trash2
-                    className={`w-4 h-4 ${
-                      activeTab === 'trash' ? 'text-indigo-400' : 'text-gray-500'
-                    }`}
-                  />
-                  <span>Trash Bin</span>
-                </div>
-                {trashCount > 0 && (
-                  <span className="text-[11px] font-semibold bg-[#1a1a1a] border border-[#2a2a2a] text-gray-400 px-2 py-0.5 rounded-full">
-                    {trashCount}
-                  </span>
-                )}
-              </button>
-
+                />
+              ))}
             </nav>
           </div>
 

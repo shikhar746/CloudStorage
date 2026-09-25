@@ -37,5 +37,7 @@
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
-  }
+  },
+  // the build compiles src only; tests are typechecked via tsconfig.test.json
+  "include": ["src"]
 }
